@@ -1,0 +1,132 @@
+variables:
+   # registry.datnxdevops.site/gitlab-cicd/reactjs:staging_1234
+    DOCKER_IMAGE: ${REGISTRY_URL}/${REGISTRY_PROJECT}/${CI_PROJECT_NAME}:${CI_COMMIT_TAG}
+    USER: fullstack
+    FOLDER_DEPLOY: /gitlab-deploy/
+stages:
+  - build
+  - print_notification
+  - release
+  - deploy
+  - showlog
+
+build:
+  stage: build
+  variables:
+    GIT_STRATEGY: clone
+  script:
+    - >
+      if [[ "$CI_COMMIT_REF_NAME" =~ ^staging_([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+        echo "Building Docker image for staging environment..."
+        docker build -t ${DOCKER_IMAGE} --build-arg BUILD_ENV=staging . > build.log 2>&1 || echo "Build failed"
+
+      elif [[ "$CI_COMMIT_REF_NAME" =~ ^master_([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+        echo "Building Docker image for production environment..."
+        docker build -t ${DOCKER_IMAGE} --build-arg BUILD_ENV=production . > build.log 2>&1 || echo "Build failed"
+      
+      else
+        echo "Invalid branch ($CI_COMMIT_REF_NAME) for building Docker image"
+        exit 1
+      fi
+  tags:
+    - gitlab-runner
+  only:
+    - tags
+  artifacts:
+    paths:
+      - build.log
+
+
+build_noti:
+  stage: print_notification
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - build_content=$(cat build.log)
+    - |
+      project_info=$(cat <<EOF
+      ===Notification from the system===
+      Project ID: $CI_PROJECT_ID
+      Project name: $CI_PROJECT_NAME
+      Project URL: $CI_PROJECT_URL
+      Branch: $CI_COMMIT_REF_NAME
+      Commit: $CI_COMMIT_SHA
+      EOF
+      )
+    - message="$build_content"\n\n"$project_info"
+    - echo $build_content
+    - if grep -q "ERROR" build.log; then curl -X POST
+       "https://api.telegram.org/bot${TOKEN_BOTFATHER}/sendMessage" -d "chat_id=$CHAT_ID&text=$message"; exit 1;
+      else
+        curl -X POST "https://api.telegram.org/bot${TOKEN_BOTFATHER}/sendMessage" -d "chat_id=$CHAT_ID&text=$message Build ReactJS Image Success!";
+      fi
+  tags:
+    - gitlab-runner
+  only:
+    - tags
+
+realase:
+  stage: release
+  variables:
+    GIT_STRATEGY: none
+  before_script:
+    - docker login ${REGISTRY_URL} -u ${REGISTRY_USER} -p ${REGISTRY_PASSWORD}
+  script:
+    - docker push ${DOCKER_IMAGE}
+  tags:
+    - gitlab-runner
+  only:
+    - tags
+    
+deploy:
+  stage: deploy
+  when: manual
+  variables:
+    GIT_STRATEGY: none
+  before_script:
+    - docker login ${REGISTRY_URL} -u ${REGISTRY_USER} -p ${REGISTRY_PASSWORD}
+  script:
+    - >
+      if [ "$GITLAB_USER_LOGIN" == 'DatNX' ]; then
+        
+        if [[ "$CI_COMMIT_REF_NAME" =~ ^staging_([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+          SSH_SERVER="${SERVER_STAGING}"
+          SERVER_TAG="staging"
+        elif [[ "$CI_COMMIT_REF_NAME" =~ ^master_([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+          SSH_SERVER="${SERVER_PRODUCTION}"
+          SERVER_TAG="production"
+        else
+          echo "Invalid branch or tag for deployment"
+          exit 1
+        fi
+        ssh datnx@${SSH_SERVER} "
+          sudo chown -R fullstack. ${FOLDER_DEPLOY} &&
+          cd ${FOLDER_DEPLOY} &&
+          docker compose down &&
+          docker image rm -f ${REGISTRY_URL}/${REGISTRY_PROJECT}/${CI_PROJECT_NAME}:${SERVER_TAG} && 
+          docker pull ${DOCKER_IMAGE} &&
+          docker tag ${DOCKER_IMAGE}  ${REGISTRY_URL}/${REGISTRY_PROJECT}/${CI_PROJECT_NAME}:${SERVER_TAG} &&
+          docker image rm -f ${DOCKER_IMAGE} &&
+          docker compose up -d "
+      else
+        echo "Permission denied for deployment"
+        exit 1
+      fi
+  tags:
+    - gitlab-runner
+  only:
+    - tags
+
+
+showlog:
+  stage: showlog
+  when: manual
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - sleep 10s 
+    - docker ps 
+  tags:
+    - gitlab-runner
+  only:
+    - tags
